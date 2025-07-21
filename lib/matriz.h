@@ -16,5 +16,5 @@ void matriz_init(void); // Inicializa a matriz de LED WS2812
 void setled(const uint index, const uint8_t r, const uint8_t g, const uint8_t b); // Define a cor de um LED específico no array
 void display(); // Envia os valores de cor armazenados no array para os LEDs fisicamente
 void matriz(uint8_t r, uint8_t g, uint8_t b); // Acende todos os LEDs da matriz com a mesma cor
-
+void matriz_x(uint8_t r, uint8_t g, uint8_t b); // Acende os os LEDs em 'X'
 #endif 

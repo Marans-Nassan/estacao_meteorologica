@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include "pico/multicore.h"
 #include "hardware/pwm.h"
 #include "hardware/i2c.h"
@@ -25,11 +26,13 @@
 #define i2c_sda_b 14
 #define i2c_scl_b 15
 #define i2c_endereco 0x3c
+#define buzzer_a 21
 ssd1306_t ssd;
 AHT20_Data data;
 int32_t raw_temp_bmp;
 int32_t raw_pressure;
 struct bmp280_calib_param params;
+double altitude = 0;
 char str_tmp1[5]; 
 char str_alt[5];   
 char str_tmp2[5];  
@@ -40,6 +43,15 @@ typedef struct checks{
     bool error3;
 } checks; 
 checks c = {false, false, false};
+
+uint8_t slice = 0;
+typedef struct {
+    float dc;           // wrap value do PWM
+    float div;          // divisor de clock
+    bool alarm_state;   // estado da sirene
+    alarm_id_t alarm_pwm;
+} pwm_struct;
+pwm_struct pw = {7812.5, 32.0, false, 0};
 
 #define interrupcoes(gpio) gpio_set_irq_enabled_with_callback(gpio, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
@@ -52,8 +64,12 @@ void init_i2c1(void);
 void init_oled(void);
 void init_bmp280(void);
 void init_aht20(void);
+void pwm_setup(void);   // Configura o PWM
+void pwm_on(uint8_t duty_cycle); // Ativa o pwm.
+void pwm_off(void); // Desliga o pwm e o buzzer afim de evitar qualquer vazamento no periféricovoid gpio_irq_handler(uint gpio, uint32_t events);
 void gpio_irq_handler(uint gpio, uint32_t events);
 double calcular_altitude(double pressure);
+int64_t variacao_temp(alarm_id_t, void *user_data);
 
 int main(){
     stdio_init_all();
@@ -63,6 +79,8 @@ int main(){
     init_i2c0();
     init_bmp280();
     init_aht20();
+    matriz_init();
+    pwm_setup();
 
     while (true) {
         // Leitura do BMP280
@@ -70,29 +88,51 @@ int main(){
         int32_t temperature = bmp280_convert_temp(raw_temp_bmp, &params);
         int32_t pressure = bmp280_convert_pressure(raw_pressure, raw_temp_bmp, &params);
 
-        // Cálculo da altitude
-        double altitude = calcular_altitude(pressure);
-
-        printf("Pressao = %.3f kPa\n", pressure / 1000.0);
-        printf("Temperatura BMP: = %.2f C\n", temperature / 100.0);
-        printf("Altitude estimada: %.2f m\n", altitude);
+        // Checagem BMP280: valores plausíveis
+        if (temperature < -4000 || temperature > 8500 || pressure < 30000 || pressure > 110000) {
+            printf("Erro na leitura do BMP280!\n");
+            c.error2 = false;
+            sprintf(str_tmp1, "---");
+            sprintf(str_alt, "---");
+        } else {
+            c.error2 = true;
+            altitude = calcular_altitude(pressure);
+            printf("Pressao = %.3f kPa\n", pressure / 1000.0);
+            printf("Temperatura BMP: = %.2f C\n", temperature / 100.0);
+            printf("Altitude estimada: %.2f m\n", altitude);
+            sprintf(str_tmp1, "%.1fC", temperature / 100.0);
+            sprintf(str_alt, "%.0fm", altitude);
+        }
 
         // Leitura do AHT20
         if (aht20_read(i2c_port_a, &data)){
             printf("Temperatura AHT: %.2f C\n", data.temperature);
             printf("Umidade: %.2f %%\n\n\n", data.humidity);
-            c.error1 = true;
+            c.error3 = true;
         }
         else{
             printf("Erro na leitura do AHT10!\n\n\n");
-            c.error1 = false;
+            c.error3 = false;
         }
+        if(!c.error2 && !c.error3) c.error1 = true;
+        else c.error1 = false;
+
 
 
         sprintf(str_tmp1, "%.1fC", temperature / 100.0);  
         sprintf(str_alt, "%.0fm", altitude);  
         sprintf(str_tmp2, "%.1fC", data.temperature);  
-        sprintf(str_umi, "%.1f%%", data.humidity);     
+        sprintf(str_umi, "%.1f%%", data.humidity);   
+        matriz(c.error1, c.error2, c.error3);  
+        if((temperature < 10 || temperature > 40) && !pw.alarm_state) {
+            pw.alarm_pwm = add_alarm_in_ms(60000, variacao_temp, NULL, false);
+            pw.alarm_state = true;
+        } else {
+            pwm_off();
+            pw.alarm_state = false;
+            cancel_alarm(pw.alarm_pwm);
+        }
+        
     }
 }
 
@@ -168,10 +208,41 @@ void init_aht20(void){
     aht20_init(i2c_port_a);
 }
 
+void pwm_setup(void) {
+    gpio_set_function(buzzer_a, GPIO_FUNC_PWM);
+    slice = pwm_gpio_to_slice_num(buzzer_a);
+    pwm_set_clkdiv(slice, pw.div);
+    pwm_set_wrap(slice, pw.dc);
+    pwm_set_enabled(slice, false);
+}
+
+void pwm_on(uint8_t duty_cycle) {
+    gpio_set_function(buzzer_a, GPIO_FUNC_PWM);
+    pwm_set_gpio_level(buzzer_a, (uint16_t)((pw.dc * duty_cycle) / 100));
+    pwm_set_enabled(slice, true);
+}
+
+void pwm_off(void) {
+    pwm_set_enabled(slice, false);
+    gpio_set_function(buzzer_a, GPIO_FUNC_SIO);
+    gpio_put(buzzer_a, 0);
+}
+
 void gpio_irq_handler(uint gpio, uint32_t events){
-    
+    uint64_t current_time = to_ms_since_boot(get_absolute_time());
+    static uint64_t last_time_a = 0, last_time_b = 0;
+    if(gpio == bot_a && (current_time - last_time_a > 300)) {
+        pwm_off();
+        last_time_a = current_time;
+    }
 }
 
 double calcular_altitude(double pressure){
     return 44330.0 * (1.0 - pow(pressure / press_nivel_mar, 0.1903));
+}
+
+int64_t variacao_temp(alarm_id_t, void *user_data){
+    pwm_on(50);
+    pw.alarm_state = false;
+    return 0;
 }

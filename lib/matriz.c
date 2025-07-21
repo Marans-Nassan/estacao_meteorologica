@@ -49,13 +49,11 @@ void matriz(uint8_t r, uint8_t g, uint8_t b){
         display();    
 }
 
-void matriz_v(uint8_t r, uint8_t g, uint8_t b, const uint8_t *leds, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        setled(leds[i], r, g, b);
-    }
-    display();
+void matriz_x(uint8_t r, uint8_t g, uint8_t b){
+    const uint8_t digit_leds[] = {24, 20, 18, 16, 12, 8, 6, 4, 0};
+    size_t count = sizeof(digit_leds)/sizeof (digit_leds[0]);
+        for (size_t i = 0; i < count; ++i) {
+            setled(digit_leds[i], r, g, b); // RGB
+        }
+        display();    
 }
-
-/*uint8_t leds_exemplo[] = {24, 23, 22, 21};
-matriz(255, 0, 0, leds_exemplo, sizeof(leds_exemplo) / sizeof(leds_exemplo[0])); 
-EXEMPLO DE USO */
