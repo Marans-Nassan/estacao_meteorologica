@@ -7,6 +7,9 @@
 #include "lib/ssd1306.h"
 #include "lib/matriz.h"
 #include "lib/font.h"
+#include "lib/bmp280.h"
+#include "lib/aht20.h"
+#include "lwipopts.h"
 
 #define bot_a 5
 #define bot_b 6
@@ -20,6 +23,7 @@
 void core1(void);
 void init_leds(void);
 void init_botoes(void);
+void gpio_irq_handler(uint gpio, uint32_t events);
 
 int main(){
     stdio_init_all();
@@ -53,4 +57,8 @@ void init_botoes(void){
         gpio_set_dir(botoes, GPIO_IN);
         gpio_pull_up(botoes);
     }
+}
+
+void gpio_irq_handler(uint gpio, uint32_t events){
+    
 }

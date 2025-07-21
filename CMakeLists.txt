@@ -31,7 +31,12 @@ project(estacao_meteorologica C CXX ASM)
 
 pico_sdk_init()
 
-add_executable(${PROJECT_NAME} estacao_meteorologica.c lib/ssd1306.c lib/matriz.c )
+add_executable(${PROJECT_NAME} 
+estacao_meteorologica.c 
+lib/ssd1306.c 
+lib/matriz.c
+lib/bmp280.c
+lib/aht20.c )
 
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/lib/ws2812.pio)
 
@@ -47,6 +52,7 @@ target_link_libraries(${PROJECT_NAME}
         hardware_pwm
         hardware_i2c
         hardware_pio
+        pico_cyw43_arch_lwip_threadsafe_background
         )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
