@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "pico/multicore.h"
@@ -11,7 +12,13 @@
 #include "lib/font.h"
 #include "lib/bmp280.h"
 #include "lib/aht20.h"
+#include "lwip/pbuf.h"
+#include "lwip/tcp.h"
+#include "lwip/netif.h"
 #include "lwipopts.h"
+#include "html_body.h"
+#include "pico/cyw43_arch.h"
+
 
 #define i2c_port_a i2c0
 #define i2c_sda_a 0
@@ -27,12 +34,20 @@
 #define i2c_scl_b 15
 #define i2c_endereco 0x3c
 #define buzzer_a 21
+#define rede "S.F.C 2"
+#define senha "857aj431"
+char ip_adr[20];
+
+
 ssd1306_t ssd;
 AHT20_Data data;
 int32_t raw_temp_bmp;
 int32_t raw_pressure;
 struct bmp280_calib_param params;
 double altitude = 0;
+int temperature = 0;
+int nivel_atual = 0;
+float humidity = 0;
 char str_tmp1[5]; 
 char str_alt[5];   
 char str_tmp2[5];  
@@ -49,12 +64,26 @@ typedef struct {
     float dc;           // wrap value do PWM
     float div;          // divisor de clock
     bool alarm_state;   // estado da sirene
+    bool alarm_react;   // permite reativar alarme
     alarm_id_t alarm_pwm;
 } pwm_struct;
-pwm_struct pw = {7812.5, 32.0, false, 0};
+pwm_struct pw = {7812.5, 32.0, false, true, 0};
+
+struct http_state{
+    char response[8192];
+    size_t len;
+    size_t sent;
+};
+
+typedef struct {
+    int min;
+    int max;
+    int offset;
+} limites_t;
+
+static limites_t limites ={0, 100, 0};
 
 #define interrupcoes(gpio) gpio_set_irq_enabled_with_callback(gpio, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
-
 
 void core1(void);
 void init_leds(void);
@@ -64,12 +93,18 @@ void init_i2c1(void);
 void init_oled(void);
 void init_bmp280(void);
 void init_aht20(void);
+int16_t init_internet(void);
+uint8_t endereco_ip(void);
 void pwm_setup(void);   // Configura o PWM
 void pwm_on(uint8_t duty_cycle); // Ativa o pwm.
 void pwm_off(void); // Desliga o pwm e o buzzer afim de evitar qualquer vazamento no periféricovoid gpio_irq_handler(uint gpio, uint32_t events);
 void gpio_irq_handler(uint gpio, uint32_t events);
 double calcular_altitude(double pressure);
 int64_t variacao_temp(alarm_id_t, void *user_data);
+static err_t http_sent(void *arg, struct tcp_pcb *tpcb, u16_t len);
+static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
+static err_t connection_callback(void *arg, struct tcp_pcb *newpcb, err_t err);
+static void start_http_server(void);
 
 int main(){
     stdio_init_all();
@@ -81,11 +116,14 @@ int main(){
     init_aht20();
     matriz_init();
     pwm_setup();
+    init_internet();
+    interrupcoes(bot_a);
+    start_http_server();
 
     while (true) {
         // Leitura do BMP280
         bmp280_read_raw(i2c_port_a, &raw_temp_bmp, &raw_pressure);
-        int32_t temperature = bmp280_convert_temp(raw_temp_bmp, &params);
+        temperature = bmp280_convert_temp(raw_temp_bmp, &params);
         int32_t pressure = bmp280_convert_pressure(raw_pressure, raw_temp_bmp, &params);
 
         // Checagem BMP280: valores plausíveis
@@ -123,20 +161,27 @@ int main(){
         sprintf(str_alt, "%.0fm", altitude);  
         sprintf(str_tmp2, "%.1fC", data.temperature);  
         sprintf(str_umi, "%.1f%%", data.humidity);   
-        matriz(c.error1, c.error2, c.error3);  
-        if((temperature < 10 || temperature > 40) && !pw.alarm_state) {
-            pw.alarm_pwm = add_alarm_in_ms(60000, variacao_temp, NULL, false);
+        matriz(c.error1, c.error2, c.error3);
+        if ((temperature < 1000 || temperature > 4000) && !pw.alarm_state && pw.alarm_react) {
+            pw.alarm_pwm = add_alarm_in_ms(3000, variacao_temp, NULL, false);
             pw.alarm_state = true;
-        } else {
-            pwm_off();
-            pw.alarm_state = false;
-            cancel_alarm(pw.alarm_pwm);
+            pw.alarm_react = false;
         }
-        
+        if (temperature >= 1000 && temperature <= 4000) {
+            if (pw.alarm_state) {
+                pwm_off();
+                pw.alarm_state = false;
+                cancel_alarm(pw.alarm_pwm);
+            }
+            pw.alarm_react = true;
+        }
+        nivel_atual = temperature;
+        cyw43_arch_poll();
     }
 }
 
 void core1(void){
+    sleep_ms(5000);
     bool cor = true;
     init_i2c1();
     init_oled();
@@ -145,8 +190,8 @@ void core1(void){
         ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);      
         ssd1306_line(&ssd, 3, 25, 123, 25, cor);           
         ssd1306_line(&ssd, 3, 37, 123, 37, cor);            
-        ssd1306_draw_string(&ssd, "CEPEDI   TIC37", 8, 6);  
-        ssd1306_draw_string(&ssd, "EMBARCATECH", 20, 16);
+        ssd1306_draw_string(&ssd, " Meteorologia", 8, 6);  
+        ssd1306_draw_string(&ssd, ip_adr, 20, 16);
         ssd1306_draw_string(&ssd, "BMP280  AHT10", 10, 28); 
         ssd1306_line(&ssd, 63, 25, 63, 60, cor);            
         ssd1306_draw_string(&ssd, str_tmp1, 14, 41);             
@@ -208,6 +253,37 @@ void init_aht20(void){
     aht20_init(i2c_port_a);
 }
 
+int16_t init_internet(void){
+    
+    if (cyw43_arch_init()) {
+        printf("Falha ao inicializar Wi-Fi\n");
+        gpio_put(red_led, 1);
+        return -1;
+    } else gpio_put(red_led, 0);
+
+    cyw43_arch_enable_sta_mode();
+
+    if (cyw43_arch_wifi_connect_timeout_ms(rede, senha, CYW43_AUTH_WPA2_AES_PSK, 20000)) {
+        printf("Falha ao conectar ao Wi-Fi\n");
+        strcpy(ip_adr, "SEM CONEXAO");
+        gpio_put(blue_led, 1);
+        cyw43_arch_deinit();
+        return -1;
+    } else gpio_put(blue_led, 0);
+
+    if(endereco_ip()) gpio_put(green_led, 1);
+    else gpio_put(green_led, 0);
+    return 0;
+}
+
+uint8_t endereco_ip(void){
+        cyw43_arch_lwip_begin();
+        struct netif *netif = &cyw43_state.netif[0];
+        snprintf(ip_adr, sizeof(ip_adr), "%s", ip4addr_ntoa(netif_ip4_addr(netif)));
+        cyw43_arch_lwip_end();
+        return 1;
+}
+
 void pwm_setup(void) {
     gpio_set_function(buzzer_a, GPIO_FUNC_PWM);
     slice = pwm_gpio_to_slice_num(buzzer_a);
@@ -233,6 +309,9 @@ void gpio_irq_handler(uint gpio, uint32_t events){
     static uint64_t last_time_a = 0, last_time_b = 0;
     if(gpio == bot_a && (current_time - last_time_a > 300)) {
         pwm_off();
+        pw.alarm_state = false;
+        pw.alarm_react = false;
+        cancel_alarm(pw.alarm_pwm);
         last_time_a = current_time;
     }
 }
@@ -243,6 +322,174 @@ double calcular_altitude(double pressure){
 
 int64_t variacao_temp(alarm_id_t, void *user_data){
     pwm_on(50);
-    pw.alarm_state = false;
-    return 0;
+    return 1;
+}
+
+static err_t http_sent(void *arg, struct tcp_pcb *tpcb, u16_t len){
+    struct http_state *hs = (struct http_state *)arg;
+    hs->sent += len;
+
+    if (hs->sent >= hs->len) {
+        tcp_close(tpcb);
+        free(hs);
+        return ERR_OK;
+    }
+
+    size_t remaining = hs->len - hs->sent;
+    size_t chunk = remaining > 1024 ? 1024 : remaining;
+    err_t err = tcp_write(tpcb, hs->response + hs->sent, chunk, TCP_WRITE_FLAG_COPY);
+    if (err == ERR_OK) {
+        tcp_output(tpcb);
+    } else {
+        printf("Erro ao enviar chunk restante: %d\n", err);
+    }
+
+    return ERR_OK;
+}
+
+static err_t connection_callback(void *arg, struct tcp_pcb *newpcb, err_t err){
+    tcp_recv(newpcb, http_recv);
+    return ERR_OK;
+}
+
+
+static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err){
+    if (!p){
+        tcp_close(tpcb);
+        return ERR_OK;
+    }
+
+    char *req = (char *)p->payload;
+    struct http_state *hs = malloc(sizeof(struct http_state));
+    if (!hs){
+        pbuf_free(p);
+        tcp_close(tpcb);
+        return ERR_MEM;
+    }
+    hs->sent = 0;
+
+if (strstr(req, "GET / ")) {
+    extern const char HTML_BODY[];
+    hs->len = snprintf(hs->response, sizeof hs->response,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        (unsigned)strlen(HTML_BODY),
+        HTML_BODY
+    );
+
+    tcp_arg(tpcb, hs);
+    tcp_sent(tpcb, http_sent);
+    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+    tcp_output(tpcb);
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+if (strstr(req, "GET /api/data")) {
+    // calcula nivel com offset e clamp
+    int nivel_aplic = nivel_atual + limites.offset;
+    if (nivel_aplic < 0) nivel_aplic = 0;
+    if (nivel_aplic > 100) nivel_aplic = 100;
+
+    // monta payload
+    char json_payload[128];
+    int json_len = snprintf(json_payload, sizeof json_payload,
+        "{\"min\":%d,\"max\":%d,\"offset\":%d,"
+        "\"nivel_atual\":%d,\"error\":%s}\r\n",
+        limites.min,
+        limites.max,
+        limites.offset,
+        nivel_aplic,
+        c.error1 ? "true" : "false"
+    );
+
+    // cabeçalho HTTP
+    hs->len = snprintf(hs->response, sizeof hs->response,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        json_len, json_payload
+    );
+
+    tcp_arg(tpcb, hs);
+    tcp_sent(tpcb, http_sent);
+    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+    tcp_output(tpcb);
+    pbuf_free(p);
+    return ERR_OK;
+}
+else if (strstr(req, "POST /api/limites")) {
+    char *min_str = strstr(req, "min=");
+    char *max_str = strstr(req, "max=");
+    char *off_str = strstr(req, "offset=");
+    if (min_str && max_str && off_str) {
+        limites.min   = atoi(min_str  + 4);  // pula "min="
+        limites.max   = atoi(max_str  + 4);  // pula "max="
+        limites.offset  = atoi(off_str + 7);   // pula "offset="
+        // validação simples
+        if (limites.min >= limites.max) {
+            hs->len = snprintf(hs->response, sizeof hs->response,
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            );
+        } else {
+            hs->len = snprintf(hs->response, sizeof hs->response,
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            );
+        }
+    } else {
+        // parâmetros faltando
+        hs->len = snprintf(hs->response, sizeof hs->response,
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        );
+    }
+
+    tcp_arg(tpcb, hs);
+    tcp_sent(tpcb, http_sent);
+    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+    tcp_output(tpcb);
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+    tcp_arg(tpcb, hs);
+    tcp_sent(tpcb, http_sent);
+
+    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+    tcp_output(tpcb);
+
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static void start_http_server(void){
+    struct tcp_pcb *pcb = tcp_new();
+    if (!pcb)
+    {
+        printf("Erro ao criar PCB TCP\n");
+        return;
+    }
+    if (tcp_bind(pcb, IP_ADDR_ANY, 80) != ERR_OK)
+    {
+        printf("Erro ao ligar o servidor na porta 80\n");
+        return;
+    }
+    pcb = tcp_listen(pcb);
+    tcp_accept(pcb, connection_callback);
+    printf("Servidor HTTP rodando na porta 80...\n");
 }
