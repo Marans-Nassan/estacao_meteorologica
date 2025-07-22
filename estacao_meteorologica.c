@@ -91,10 +91,10 @@ void init_botoes(void);
 void init_i2c0(void);
 void init_i2c1(void);
 void init_oled(void);
-void init_bmp280(void);
-void init_aht20(void);
 int16_t init_internet(void);
 uint8_t endereco_ip(void);
+void init_bmp280(void);
+void init_aht20(void);
 void pwm_setup(void);   // Configura o PWM
 void pwm_on(uint8_t duty_cycle); // Ativa o pwm.
 void pwm_off(void); // Desliga o pwm e o buzzer afim de evitar qualquer vazamento no periféricovoid gpio_irq_handler(uint gpio, uint32_t events);
@@ -103,6 +103,7 @@ double calcular_altitude(double pressure);
 int64_t variacao_temp(alarm_id_t, void *user_data);
 static err_t http_sent(void *arg, struct tcp_pcb *tpcb, u16_t len);
 static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
+void parse_post_params(char *req, limites_t *limites);
 static err_t connection_callback(void *arg, struct tcp_pcb *newpcb, err_t err);
 static void start_http_server(void);
 
@@ -161,7 +162,8 @@ int main(){
         sprintf(str_alt, "%.0fm", altitude);  
         sprintf(str_tmp2, "%.1fC", data.temperature);  
         sprintf(str_umi, "%.1f%%", data.humidity);   
-        matriz(c.error1, c.error2, c.error3);
+        matriz(0, c.error2, c.error3);
+        matriz_x(c.error1, 0, 0);
         if ((temperature < 1000 || temperature > 4000) && !pw.alarm_state && pw.alarm_react) {
             pw.alarm_pwm = add_alarm_in_ms(3000, variacao_temp, NULL, false);
             pw.alarm_state = true;
@@ -185,6 +187,7 @@ void core1(void){
     bool cor = true;
     init_i2c1();
     init_oled();
+    
     while(true){
         ssd1306_fill(&ssd, !cor);                          
         ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);      
@@ -194,13 +197,25 @@ void core1(void){
         ssd1306_draw_string(&ssd, ip_adr, 20, 16);
         ssd1306_draw_string(&ssd, "BMP280  AHT10", 10, 28); 
         ssd1306_line(&ssd, 63, 25, 63, 60, cor);            
-        ssd1306_draw_string(&ssd, str_tmp1, 14, 41);             
-        ssd1306_draw_string(&ssd, str_alt, 14, 52);             
-        ssd1306_draw_string(&ssd, str_tmp2, 73, 41);             
-        ssd1306_draw_string(&ssd, str_umi, 73, 52);           
+        
+        if(c.error2) {
+            ssd1306_draw_string(&ssd, str_tmp1, 14, 41);             
+            ssd1306_draw_string(&ssd, str_alt, 14, 52);             
+        } else {
+            ssd1306_draw_string(&ssd, "---", 14, 41);
+            ssd1306_draw_string(&ssd, "---", 14, 52);
+        }
+        
+        if(c.error3) {
+            ssd1306_draw_string(&ssd, str_tmp2, 73, 41);             
+            ssd1306_draw_string(&ssd, str_umi, 73, 52);
+        } else {
+            ssd1306_draw_string(&ssd, "---", 73, 41);
+            ssd1306_draw_string(&ssd, "---", 73, 52);
+        }
+        
         ssd1306_send_data(&ssd);                            
-
-        sleep_ms(50);
+        sleep_ms(1000); 
     }
 }
 
@@ -353,61 +368,91 @@ static err_t connection_callback(void *arg, struct tcp_pcb *newpcb, err_t err){
 }
 
 
-static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err){
-    if (!p){
+void parse_post_params(char *req, limites_t *limites) {
+    char *body = strstr(req, "\r\n\r\n");
+    if (body) {
+        body += 4;
+        char *token = strtok(body, "&");
+        while (token) {
+            if (strncmp(token, "min=", 4) == 0) {
+                limites->min = atoi(token + 4);
+            } 
+            else if (strncmp(token, "max=", 4) == 0) {
+                limites->max = atoi(token + 4);
+            } 
+            else if (strncmp(token, "offset=", 7) == 0) {
+                limites->offset = atoi(token + 7);
+            }
+            token = strtok(NULL, "&");
+        }
+    }
+}
+
+static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    if (!p) {
         tcp_close(tpcb);
         return ERR_OK;
     }
 
+    tcp_recved(tpcb, p->len);
+
+    // Converta o payload em string C
     char *req = (char *)p->payload;
-    struct http_state *hs = malloc(sizeof(struct http_state));
-    if (!hs){
+
+    struct http_state *hs = malloc(sizeof *hs);
+    if (!hs) {
         pbuf_free(p);
         tcp_close(tpcb);
         return ERR_MEM;
     }
-    hs->sent = 0;
+    memset(hs, 0, sizeof *hs);
 
-if (strstr(req, "GET / ")) {
-    extern const char HTML_BODY[];
-    hs->len = snprintf(hs->response, sizeof hs->response,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: %u\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        (unsigned)strlen(HTML_BODY),
-        HTML_BODY
-    );
+    if (strncmp(req, "GET /", 5) == 0) {
+        extern const char HTML_BODY[];
+        size_t L = strlen(HTML_BODY);
+        hs->len = snprintf(hs->response, sizeof hs->response,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: %u\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "%s",
+            (unsigned)L, HTML_BODY
+        );
 
-    tcp_arg(tpcb, hs);
-    tcp_sent(tpcb, http_sent);
-    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-    pbuf_free(p);
-    return ERR_OK;
-}
+        tcp_arg(tpcb, hs);
+        tcp_sent(tpcb, http_sent);
+        tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        return ERR_OK;
+    }
 
 if (strstr(req, "GET /api/data")) {
-    // calcula nivel com offset e clamp
-    int nivel_aplic = nivel_atual + limites.offset;
-    if (nivel_aplic < 0) nivel_aplic = 0;
-    if (nivel_aplic > 100) nivel_aplic = 100;
+    int aplicado = nivel_atual + limites.offset;
+    if (aplicado < 0) aplicado = 0;
+    if (aplicado > 100) aplicado = 100;
 
-    // monta payload
-    char json_payload[128];
+    char json_payload[256];
     int json_len = snprintf(json_payload, sizeof json_payload,
         "{\"min\":%d,\"max\":%d,\"offset\":%d,"
-        "\"nivel_atual\":%d,\"error\":%s}\r\n",
+        "\"nivel_atual\":%d,"
+        "\"temp_bmp\":%.1f,"
+        "\"altitude\":%.1f,"
+        "\"temp_aht\":%.1f,"
+        "\"humidity\":%.1f}",
         limites.min,
         limites.max,
         limites.offset,
-        nivel_aplic,
-        c.error1 ? "true" : "false"
+        aplicado,
+        temperature / 100.0,   // Temperatura do BMP280 em °C
+        altitude,               // Altitude em metros
+        data.temperature,       // Temperatura do AHT20 em °C
+        data.humidity          // Umidade do AHT20 em %
     );
 
-    // cabeçalho HTTP
+    printf("Enviando JSON: %s\n", json_payload); // Debug
+    
     hs->len = snprintf(hs->response, sizeof hs->response,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
@@ -425,57 +470,41 @@ if (strstr(req, "GET /api/data")) {
     pbuf_free(p);
     return ERR_OK;
 }
-else if (strstr(req, "POST /api/limites")) {
-    char *min_str = strstr(req, "min=");
-    char *max_str = strstr(req, "max=");
-    char *off_str = strstr(req, "offset=");
-    if (min_str && max_str && off_str) {
-        limites.min   = atoi(min_str  + 4);  // pula "min="
-        limites.max   = atoi(max_str  + 4);  // pula "max="
-        limites.offset  = atoi(off_str + 7);   // pula "offset="
-        // validação simples
-        if (limites.min >= limites.max) {
-            hs->len = snprintf(hs->response, sizeof hs->response,
-                "HTTP/1.1 400 Bad Request\r\n"
-                "Content-Length: 0\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-            );
-        } else {
-            hs->len = snprintf(hs->response, sizeof hs->response,
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Length: 0\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-            );
-        }
-    } else {
-        // parâmetros faltando
-        hs->len = snprintf(hs->response, sizeof hs->response,
-            "HTTP/1.1 400 Bad Request\r\n"
-            "Content-Length: 0\r\n"
+
+    if (strstr(req, "POST /api/limites")) {
+        parse_post_params(req, &limites);
+
+        const char *resp =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 2\r\n"
             "Connection: close\r\n"
             "\r\n"
-        );
+            "{}";
+
+        tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        free(hs);
+        return ERR_OK;
     }
 
-    tcp_arg(tpcb, hs);
-    tcp_sent(tpcb, http_sent);
-    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-    pbuf_free(p);
-    return ERR_OK;
-}
+    {
+        const char *notf =
+            "HTTP/1.1 404 Not Found\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 9\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "Not Found";
 
-    tcp_arg(tpcb, hs);
-    tcp_sent(tpcb, http_sent);
-
-    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-
-    pbuf_free(p);
-    return ERR_OK;
-}
+        tcp_write(tpcb, notf, strlen(notf), TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        free(hs);
+        return ERR_OK;
+    }
+}   
 
 static void start_http_server(void){
     struct tcp_pcb *pcb = tcp_new();
