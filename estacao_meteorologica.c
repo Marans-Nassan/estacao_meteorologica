@@ -48,6 +48,7 @@ double altitude = 0;
 int temperature = 0;
 int nivel_atual = 0;
 float humidity = 0;
+float media = 0;
 char str_tmp1[5]; 
 char str_alt[5];   
 char str_tmp2[5];  
@@ -177,8 +178,9 @@ int main(){
             }
             pw.alarm_react = true;
         }
-        nivel_atual = temperature;
+        media = ((temperature/100.0) + data.temperature)/2 ;
         cyw43_arch_poll();
+        sleep_ms(1);
     }
 }
 
@@ -393,12 +395,9 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         tcp_close(tpcb);
         return ERR_OK;
     }
-
     tcp_recved(tpcb, p->len);
-
     // Converta o payload em string C
     char *req = (char *)p->payload;
-
     struct http_state *hs = malloc(sizeof *hs);
     if (!hs) {
         pbuf_free(p);
@@ -406,6 +405,46 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         return ERR_MEM;
     }
     memset(hs, 0, sizeof *hs);
+
+    if (strstr(req, "GET /api/data")) {
+
+        char json_payload[256];
+        int json_len = snprintf(json_payload, sizeof json_payload,
+            "{\"min\":%d,\"max\":%d,\"offset\":%d,"
+            "\"nivel_atual\":%.1f,"
+            "\"temp_bmp\":%.1f,"
+            "\"altitude\":%.1f,"
+            "\"temp_aht\":%.1f,"
+            "\"humidity\":%.1f}",
+            limites.min,
+            limites.max,
+            limites.offset,
+            media,
+            temperature / 100.0,   // Temperatura do BMP280 em °C
+            altitude,               // Altitude em metros
+            data.temperature,       // Temperatura do AHT20 em °C
+            data.humidity          // Umidade do AHT20 em %
+        );
+
+        printf("Enviando JSON: %s\n", json_payload); // Debug
+
+        hs->len = snprintf(hs->response, sizeof hs->response,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "%s",
+            json_len, json_payload
+        );
+
+        tcp_arg(tpcb, hs);
+        tcp_sent(tpcb, http_sent);
+        tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        return ERR_OK;
+    }
 
     if (strncmp(req, "GET /", 5) == 0) {
         extern const char HTML_BODY[];
@@ -419,7 +458,6 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
             "%s",
             (unsigned)L, HTML_BODY
         );
-
         tcp_arg(tpcb, hs);
         tcp_sent(tpcb, http_sent);
         tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
@@ -427,84 +465,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         pbuf_free(p);
         return ERR_OK;
     }
-
-if (strstr(req, "GET /api/data")) {
-    int aplicado = nivel_atual + limites.offset;
-    if (aplicado < 0) aplicado = 0;
-    if (aplicado > 100) aplicado = 100;
-
-    char json_payload[256];
-    int json_len = snprintf(json_payload, sizeof json_payload,
-        "{\"min\":%d,\"max\":%d,\"offset\":%d,"
-        "\"nivel_atual\":%d,"
-        "\"temp_bmp\":%.1f,"
-        "\"altitude\":%.1f,"
-        "\"temp_aht\":%.1f,"
-        "\"humidity\":%.1f}",
-        limites.min,
-        limites.max,
-        limites.offset,
-        aplicado,
-        temperature / 100.0,   // Temperatura do BMP280 em °C
-        altitude,               // Altitude em metros
-        data.temperature,       // Temperatura do AHT20 em °C
-        data.humidity          // Umidade do AHT20 em %
-    );
-
-    printf("Enviando JSON: %s\n", json_payload); // Debug
-    
-    hs->len = snprintf(hs->response, sizeof hs->response,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        json_len, json_payload
-    );
-
-    tcp_arg(tpcb, hs);
-    tcp_sent(tpcb, http_sent);
-    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-    pbuf_free(p);
-    return ERR_OK;
 }
-
-    if (strstr(req, "POST /api/limites")) {
-        parse_post_params(req, &limites);
-
-        const char *resp =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\n"
-            "Content-Length: 2\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-            "{}";
-
-        tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
-        tcp_output(tpcb);
-        pbuf_free(p);
-        free(hs);
-        return ERR_OK;
-    }
-
-    {
-        const char *notf =
-            "HTTP/1.1 404 Not Found\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 9\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-            "Not Found";
-
-        tcp_write(tpcb, notf, strlen(notf), TCP_WRITE_FLAG_COPY);
-        tcp_output(tpcb);
-        pbuf_free(p);
-        free(hs);
-        return ERR_OK;
-    }
-}   
 
 static void start_http_server(void){
     struct tcp_pcb *pcb = tcp_new();
@@ -520,5 +481,5 @@ static void start_http_server(void){
     }
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, connection_callback);
-    printf("Servidor HTTP rodando na porta 80...\n");
+    printf("Servidor HTTP rodando na porta 80...\n");
 }
