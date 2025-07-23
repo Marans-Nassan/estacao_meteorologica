@@ -179,6 +179,7 @@ int main(){
         }
         nivel_atual = temperature;
         cyw43_arch_poll();
+        sleep_ms(1000); // Aguarda 1 segundo entre leituras
     }
 }
 
@@ -407,6 +408,49 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
     }
     memset(hs, 0, sizeof *hs);
 
+    if (strstr(req, "GET /api/data")) {
+        int aplicado = nivel_atual + limites.offset;
+        if (aplicado < 0) aplicado = 0;
+        if (aplicado > 100) aplicado = 100;
+
+        char json_payload[256];
+        int json_len = snprintf(json_payload, sizeof json_payload,
+            "{\"min\":%d,\"max\":%d,\"offset\":%d,"
+            "\"nivel_atual\":%d,"
+            "\"temp_bmp\":%.1f,"
+            "\"altitude\":%.1f,"
+            "\"temp_aht\":%.1f,"
+            "\"humidity\":%.1f}",
+            limites.min,
+            limites.max,
+            limites.offset,
+            aplicado,
+            temperature / 100.0,   // Temperatura do BMP280 em °C
+            altitude,               // Altitude em metros
+            data.temperature,       // Temperatura do AHT20 em °C
+            data.humidity          // Umidade do AHT20 em %
+        );
+
+        printf("Enviando JSON: %s\n", json_payload); // Debug
+        
+        hs->len = snprintf(hs->response, sizeof hs->response,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "%s",
+            json_len, json_payload
+        );
+
+        tcp_arg(tpcb, hs);
+        tcp_sent(tpcb, http_sent);
+        tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
     if (strncmp(req, "GET /", 5) == 0) {
         extern const char HTML_BODY[];
         size_t L = strlen(HTML_BODY);
@@ -427,49 +471,6 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         pbuf_free(p);
         return ERR_OK;
     }
-
-if (strstr(req, "GET /api/data")) {
-    int aplicado = nivel_atual + limites.offset;
-    if (aplicado < 0) aplicado = 0;
-    if (aplicado > 100) aplicado = 100;
-
-    char json_payload[256];
-    int json_len = snprintf(json_payload, sizeof json_payload,
-        "{\"min\":%d,\"max\":%d,\"offset\":%d,"
-        "\"nivel_atual\":%d,"
-        "\"temp_bmp\":%.1f,"
-        "\"altitude\":%.1f,"
-        "\"temp_aht\":%.1f,"
-        "\"humidity\":%.1f}",
-        limites.min,
-        limites.max,
-        limites.offset,
-        aplicado,
-        temperature / 100.0,   // Temperatura do BMP280 em °C
-        altitude,               // Altitude em metros
-        data.temperature,       // Temperatura do AHT20 em °C
-        data.humidity          // Umidade do AHT20 em %
-    );
-
-    printf("Enviando JSON: %s\n", json_payload); // Debug
-    
-    hs->len = snprintf(hs->response, sizeof hs->response,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        json_len, json_payload
-    );
-
-    tcp_arg(tpcb, hs);
-    tcp_sent(tpcb, http_sent);
-    tcp_write(tpcb, hs->response, hs->len, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-    pbuf_free(p);
-    return ERR_OK;
-}
 
     if (strstr(req, "POST /api/limites")) {
         parse_post_params(req, &limites);
